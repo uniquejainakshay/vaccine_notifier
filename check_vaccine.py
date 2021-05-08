@@ -55,16 +55,23 @@ def json_obj_from_file(fname):
     logging.info("Loaded from json file  : {}".format(fname))
     return obj
 
-def add_subscription(string, user_id):
+def add_subscription(string, user_id, is_district = False):
     reply = ""
     failure = False
     try :
         l = [ int(i.strip()) for i in string.split(' ')[1:]]
-        pin , age = l
-        if len(str(pin)) != 6: 
-            reply += "Invalid pin {}".format(pin)
-            failure = True
-        elif age < min_age_limits[-1]:
+        code , age = l
+        if is_district:
+            district_code = code
+            if len(str(district_code)) != 3:
+                reply += "Invalid pin {}".format(pin)
+                failure = True
+        else:
+            pin = code
+            if len(str(pin)) != 6: 
+                reply += "Invalid pin {}".format(pin)
+                failure = True
+        if age < min_age_limits[-1]:
             reply += "Age={} doesn't meet eligibility criteria".format(age)
             failure = True
     except: 
@@ -77,13 +84,16 @@ def add_subscription(string, user_id):
         if i <= age:
             age = i
             break
-    subscription = "{}_{}".format(pin, age)
+    if is_district:
+        subscription = "district_{}_{}".format(district_code, age)
+    else:
+        subscription = "{}_{}".format(pin, age)
     if subscription not in subscriptions: 
         subscriptions[subscription] = list()
     if user_id not in subscriptions[subscription] : 
         subscriptions[subscription].append(user_id)
     save_object_to_file(subscriptions, subscriptions_fname)
-    return "Subscribed successfully to pincode={} age={}".format(pin, age)
+    return "Subscribed successfully to district code={} / pincode={} and age={}".format(district_code, pin, age)
 
 
 def clear_all_subscriptions(user_id):
@@ -115,6 +125,14 @@ def start_telegram_bot_blocking():
         if not check_user(message):
             return
         reply = add_subscription(message.text, message.from_user.id)
+        telegram_bot_instance.reply_to(message, reply)
+        logging.info("USER_INTERACTION name={} user_id={} msg={} reply={}".format(message.from_user.first_name, message.from_user.id, message.text , reply))
+
+    @telegram_bot_instance.message_handler(commands=['subdistrict'])
+    def help_message(message):
+        if not check_user(message):
+            return
+        reply = add_subscription(message.text, message.from_user.id, True)
         telegram_bot_instance.reply_to(message, reply)
         logging.info("USER_INTERACTION name={} user_id={} msg={} reply={}".format(message.from_user.first_name, message.from_user.id, message.text , reply))
 
@@ -196,6 +214,30 @@ def check_availability(date_str, pins):
         logging.info(json.dumps(res, indent=1))
     return res
 
+def check_district_level_availability(date_str, district_codes):
+    res = {}
+    for district_code in district_codes:
+        url = f'https://cdn-api.co-vin.in/api/v2/appointment/sessions/calendarByDistrict?district_id=294&date={date_str}'
+        r = check_retry(url)
+        if not r:
+            continue
+        data = json.loads(r)
+        centers = data['centers']
+        for c in centers:
+            sessions = c['sessions']
+            for sess in sessions:
+                key = f'district_{district_code}_{sess["min_age_limit"]}'
+                value = "center={} age_limit={} date={} pin_code={} vaccine={} available_capacity={} \n".format(sess['name']\
+                    , sess['min_age_limit'] , sess['date'], sess['pincode'], sess['vaccine'], sess['available_capacity'])
+                if key not in res:
+                    res[key] = value
+                else:
+                    res[key] += value
+        time.sleep(1)
+    if len(res) > 0: 
+        logging.info(json.dumps(res, indent=1))
+    return res
+
 def daterange(no_days=10):
     dat = datetime.today()
     for i in range(no_days):
@@ -203,10 +245,12 @@ def daterange(no_days=10):
         dat = dat + timedelta(1)
 
 def check_once():
-    pins = list(set([int(i.split('_')[0]) for i in subscriptions.keys()]))
-    logging.debug("Checking for pins {}".format(json.dumps(pins,indent=1)))
+    district_codes = list(set([int(x.split('_')[1]) for x in subscriptions if x.startswith("district_")]))
+    pins = list(set([int(i.split('_')[0]) for i in subscriptions.keys() if not x.startswith("district_")]))
+    logging.debug(f'Checking for pins {json.dumps(pins,indent=1)} and district codes {json.dumps(district_codes,indent=1)}')
     for datestr in daterange():
         res = check_availability(datestr, pins)
+        res.extend(check_district_level_availability(datestr, district_codes))
         for ss in res:
             if ss in subscriptions:
                 for user_id in subscriptions[ss]:
