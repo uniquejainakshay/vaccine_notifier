@@ -19,8 +19,7 @@ error_messages  = [
     "Please don't trouble me with invalid messages, or I will request your office to stop your WFH",
     "Please don't trouble me with invalid messages, or I will request your boss to give you work on weekends",
     "Please don't trouble me with invalid messages, Oh come on ! Is it so hard to get it right ? ",
-    "Please don't trouble me with invalid messages, Can't you get it right ? I pity you ",
-    "Please don't trouble me with invalid messages, or I will trouble you with incorrect notifications"
+    "Please don't trouble me with invalid messages, Can't you get it right ? I pity you "
 ]
 help_str = """
 Only following 2 commands are supported : 
@@ -39,7 +38,9 @@ registered_users_fname = "users.json"
 subscriptions_fname = "subscriptions.json"
 
 passwd = "gimme_vaccine"
-telegram_bot_instance = telebot.TeleBot("<add your token>")
+with open('token', 'r') as f:
+    token = f.read().strip()
+telegram_bot_instance = telebot.TeleBot(token)
 
 def save_object_to_file(obj, fname):
     with open(fname, 'w') as f: 
@@ -167,8 +168,8 @@ def check_retry(url, count=10):
             return response.read().decode('utf-8')
         except:
             failure_count += 1
-            time.sleep(1)
             pass
+        time.sleep(1)
     logging.error("Max retries failure for URL : {}".format(url))
     logging.error("Stats: failure={} success={}".format(failure_count, success_count))
     return ""
@@ -207,11 +208,12 @@ def check_once():
     for datestr in daterange():
         res = check_availability(datestr, pins)
         for ss in res:
-            for user_id in subscriptions[ss]:
-                logging.debug("Informing user name={} msg={}".format(registered_users[user_id], res[ss]))
-                telegram_bot_instance.send_message(user_id, res[ss])
+            if ss in subscriptions:
+                for user_id in subscriptions[ss]:
+                    logging.debug("Informing user name={} msg={}".format(registered_users[str(user_id)], res[ss]))
+                    telegram_bot_instance.send_message(int(user_id), res[ss])
 
-def main(check_every_seconds=30):
+def main(check_every_seconds=600):
     global registered_users, subscriptions
     logging.basicConfig(level=logging.INFO, filename='vaccine_checker.log', filemode='a', format='%(asctime)s %(name)s - %(levelname)s - %(message)s')
     logging.info("Script started")
