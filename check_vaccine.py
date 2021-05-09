@@ -197,7 +197,7 @@ def check_availability(date_str, pins):
             continue
         data = response.json()
         for sess in data['sessions']:
-            if sess['available_capacity'] <= 0:
+            if sess['available_capacity'] <1:
                 continue
             key = "{}_{}".format(sess['pincode'], sess['min_age_limit'])
             value = '''center={}
