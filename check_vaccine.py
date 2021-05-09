@@ -1,8 +1,7 @@
-import urllib.request
+import requests
 import traceback 
 import json
 from datetime import datetime, timedelta
-from urllib import parse
 from subprocess import PIPE, Popen
 import time
 import threading
@@ -24,7 +23,12 @@ error_messages  = [
 help_str = """
 Only following 2 commands are supported : 
 /subscribe PINCODE YOUR_AGE : Will notify if vaccine is available at given PINCODE and your age. You can have as many subscriptions as possible
+/subdistrict DISTRICT_CODE YOUR_AGE : Will notify if vaccine is available in given district and your age. You can have as many subscriptions as possible
 /clear_subscriptions : Clears all your previous subscriptions
+
+Use following APIs to find district code for your area:
+https://cdn-api.co-vin.in/api/v2/admin/location/states
+https://cdn-api.co-vin.in/api/v2/admin/location/districts/<state_id>
 
 Dare you try sending any other command ! 
 """
@@ -55,16 +59,25 @@ def json_obj_from_file(fname):
     logging.info("Loaded from json file  : {}".format(fname))
     return obj
 
-def add_subscription(string, user_id):
+def add_subscription(string, user_id, is_district = False):
+    district_code = -1
+    pin = -1
     reply = ""
     failure = False
     try :
         l = [ int(i.strip()) for i in string.split(' ')[1:]]
-        pin , age = l
-        if len(str(pin)) != 6: 
-            reply += "Invalid pin {}".format(pin)
-            failure = True
-        elif age < min_age_limits[-1]:
+        code , age = l
+        if is_district:
+            district_code = code
+            if len(str(district_code)) != 3:
+                reply += "Invalid pin {}".format(district_code)
+                failure = True
+        else:
+            pin = code
+            if len(str(pin)) != 6: 
+                reply += "Invalid pin {}".format(pin)
+                failure = True
+        if age < min_age_limits[-1]:
             reply += "Age={} doesn't meet eligibility criteria".format(age)
             failure = True
     except: 
@@ -77,13 +90,16 @@ def add_subscription(string, user_id):
         if i <= age:
             age = i
             break
-    subscription = "{}_{}".format(pin, age)
+    if is_district:
+        subscription = "district_{}_{}".format(district_code, age)
+    else:
+        subscription = "{}_{}".format(pin, age)
     if subscription not in subscriptions: 
         subscriptions[subscription] = list()
     if user_id not in subscriptions[subscription] : 
         subscriptions[subscription].append(user_id)
     save_object_to_file(subscriptions, subscriptions_fname)
-    return "Subscribed successfully to pincode={} age={}".format(pin, age)
+    return "Subscribed successfully to district code={} / pincode={} and age={}".format(district_code, pin, age)
 
 
 def clear_all_subscriptions(user_id):
@@ -118,6 +134,14 @@ def start_telegram_bot_blocking():
         telegram_bot_instance.reply_to(message, reply)
         logging.info("USER_INTERACTION name={} user_id={} msg={} reply={}".format(message.from_user.first_name, message.from_user.id, message.text , reply))
 
+    @telegram_bot_instance.message_handler(commands=['subdistrict'])
+    def help_message(message):
+        if not check_user(message):
+            return
+        reply = add_subscription(message.text, message.from_user.id, True)
+        telegram_bot_instance.reply_to(message, reply)
+        logging.info("USER_INTERACTION name={} user_id={} msg={} reply={}".format(message.from_user.first_name, message.from_user.id, message.text , reply))
+
     @telegram_bot_instance.message_handler(commands=['clear_subscriptions'])
     def help_message(message):
         if not check_user(message):
@@ -146,26 +170,15 @@ def check_retry(url, count=10):
     global failure_count, success_count
     for i in range(count):
         try:
-            req = urllib.request.Request(
+            response = requests.get(
                 url, 
-                data=None, 
                 headers={
-                    "accept": "application/json, text/plain, */*",
-                    "accept-encoding": "gzip, deflate, br",
-                    "accept-language": "en-GB,en-US;q=0.9,en;q=0.8",
-                    "origin": "https://www.cowin.gov.in",
-                    "referer": "https://www.cowin.gov.in/",
-                    "sec-ch-ua": """Not A;Brand";v="99", "Chromium";v="90", "Google Chrome";v="90" """,
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-fetch-dest": "empty",
-                    "sec-fetch-mode": "cors",
-                    "sec-fetch-site": "cross-site",
                     "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36"
                 }
             )
-            response = urllib.request.urlopen(req)
-            success_count += 1
-            return response.read().decode('utf-8')
+            if response == 200:
+                success_count += 1
+            return response
         except:
             failure_count += 1
             pass
@@ -179,21 +192,61 @@ def check_availability(date_str, pins):
     res = {}
     for pin in pins:
         url = "https://cdn-api.co-vin.in/api/v2/appointment/sessions/public/findByPin?pincode={}&date={}".format(pin, date_str)
-        r = check_retry(url)
-        if not r:
+        response = check_retry(url)
+        if not response:
             continue
-        d = json.loads(r)
-        for sess in d['sessions']:
+        data = response.json()
+        for sess in data['sessions']:
+            if sess['available_capacity'] <= 0:
+                continue
             key = "{}_{}".format(sess['pincode'], sess['min_age_limit'])
-            value = "center={} age_limit={} date={} pin_code={} vaccine={} available_capacity={} \n".format(sess['name']\
-                 , sess['min_age_limit'] , sess['date'], sess['pincode'], sess['vaccine'], sess['available_capacity'])
+            value = '''center={}
+date={}
+pin_code={}
+available_capacity={}
+vaccine={}
+age_limit={}
+                '''.format(sess['name']\
+                 , sess['date'] , sess['pincode'], sess['available_capacity'], sess['vaccine'], sess['min_age_limit'])
             if key not in res:
-                res[key] = value
+                res[key] = [value]
             else:
-                res[key] += value
+                res[key].append(value)
         time.sleep(1)
     if len(res) > 0: 
-        logging.info(json.dumps(res, indent=1))
+        logging.debug(json.dumps(res, indent=1))
+    return res
+
+def check_district_level_availability(date_str, district_codes):
+    res = {}
+    for district_code in district_codes:
+        url = f'https://cdn-api.co-vin.in/api/v2/appointment/sessions/calendarByDistrict?district_id={district_code}&date={date_str}'
+        response = check_retry(url)
+        if not response:
+            continue
+        data = response.json()
+        centers = data['centers']
+        for c in centers:
+            sessions = c['sessions']
+            for sess in sessions:
+                if sess['available_capacity'] <= 0:
+                    continue
+                key = f'district_{district_code}_{sess["min_age_limit"]}'
+                value = '''center={}
+date={}
+pin_code={}
+available_capacity={}
+vaccine={}
+age_limit={}
+                    '''.format(c['name']\
+                    , sess['date'] , c['pincode'], sess['available_capacity'], sess['vaccine'], sess['min_age_limit'])
+                if key not in res:
+                    res[key] = [value]
+                else:
+                    res[key].append(value)
+        time.sleep(1)
+    if len(res) > 0: 
+        logging.debug(json.dumps(res, indent=1))
     return res
 
 def daterange(no_days=10):
@@ -203,17 +256,22 @@ def daterange(no_days=10):
         dat = dat + timedelta(1)
 
 def check_once():
-    pins = list(set([int(i.split('_')[0]) for i in subscriptions.keys()]))
-    logging.debug("Checking for pins {}".format(json.dumps(pins,indent=1)))
+    district_codes = list(set([int(i.split('_')[1]) for i in subscriptions if i.startswith("district_")]))
+    pins = list(set([int(i.split('_')[0]) for i in subscriptions.keys() if not i.startswith("district_")]))
+    logging.debug(f'Checking for pins {json.dumps(pins,indent=1)} and district codes {json.dumps(district_codes,indent=1)}')
     for datestr in daterange():
         res = check_availability(datestr, pins)
+        res.update(check_district_level_availability(datestr, district_codes))
         for ss in res:
             if ss in subscriptions:
                 for user_id in subscriptions[ss]:
                     logging.debug("Informing user name={} msg={}".format(registered_users[str(user_id)], res[ss]))
-                    telegram_bot_instance.send_message(int(user_id), res[ss])
+                    result_chunks = [res[ss][i:i + 5] for i in range(0, len(res[ss]), 5)]
+                    for results in result_chunks:
+                        serialized_results = "\n".join(results)
+                        telegram_bot_instance.send_message(int(user_id), serialized_results)
 
-def main(check_every_seconds=600):
+def main(check_every_seconds=60):
     global registered_users, subscriptions
     logging.basicConfig(level=logging.INFO, filename='vaccine_checker.log', filemode='a', format='%(asctime)s %(name)s - %(levelname)s - %(message)s')
     logging.info("Script started")
